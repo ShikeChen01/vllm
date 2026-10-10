@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.import_utils import LazyLoader
@@ -271,16 +270,12 @@ class StructuredOutputManager:
             return _NO_SPEC_TOKENS
 
         # Engine-based parsers also report whether the end token is content.
-        if (
-            isinstance(reasoner, ParserEngineReasoningAdapter)
-            and reasoner.reasoning_end_token_ids
-        ):
-            end = reasoner.find_reasoning_end(spec_tokens)
-            if end is not None:
-                constraint_start = end.offset + 1
-                if end.implicit:
-                    return ConstraintBounds(end.offset, constraint_start)
-                return ConstraintBounds(constraint_start, constraint_start)
+        end = reasoner.find_reasoning_end(spec_tokens)
+        if end is not None:
+            constraint_start = end.offset + 1
+            if end.implicit:
+                return ConstraintBounds(end.offset, constraint_start)
+            return ConstraintBounds(constraint_start, constraint_start)
 
         # Fallback: the grammar starts after the end token.
         # TODO: Build a read-only Sequence view over all_token_ids

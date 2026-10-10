@@ -7,7 +7,6 @@ from collections.abc import Callable, Iterable, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, cast
 
-from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.logger import init_logger
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_plugin
@@ -15,8 +14,10 @@ from vllm.utils.import_utils import import_plugin
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.entrypoints.generate.base.protocol import DeltaMessage
+    from vllm.entrypoints.mcp.tool_server import ToolServer
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+    from vllm.parser.engine.parser_engine import ReasoningEnd
     from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
@@ -114,6 +115,25 @@ class ReasoningParser:
         """
         return self.is_reasoning_end(input_ids)
 
+    def find_reasoning_end(self, token_ids: Sequence[int]) -> "ReasoningEnd | None":
+        """Locate the first reasoning end in `token_ids`, if supported.
+
+        Used by structured outputs to decide where grammar constraints start
+        within a window of speculative tokens. Parsers that can report the
+        exact end offset (and whether the end token is itself content, e.g. a
+        tool-call start) override this; see `ParserEngineReasoningAdapter`.
+
+        Args:
+            token_ids: The token ids to scan.
+
+        Returns:
+            The first reasoning end, or `None` if this parser cannot locate it
+            this way, in which case callers fall back to
+            `is_reasoning_end_streaming`.
+
+        """
+        return None
+
     @abstractmethod
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """Extract content token ids from the input_ids.
@@ -207,7 +227,7 @@ class ReasoningParser:
     def prepare_structured_tag(
         self,
         original_tag: str | None,
-        tool_server: ToolServer | None,
+        tool_server: "ToolServer | None",
     ) -> str | None:
         """Instance method that is implemented for preparing the structured tag"""
         return original_tag
