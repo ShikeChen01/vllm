@@ -71,7 +71,7 @@ from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_num_threads
 
-from torch._inductor.utils import fresh_cache
+from torch._inductor.utils import clear_caches, fresh_cache
 
 
 if TYPE_CHECKING:
@@ -303,6 +303,83 @@ def workspace_init():
 def dynamo_reset():
     yield
     torch._dynamo.reset()
+
+
+# Subdirectories of VLLM_CACHE_ROOT that do not hold compile artifacts and are
+# expensive to rebuild; they stay shared when the compile cache is isolated.
+_SHARED_VLLM_CACHE_SUBDIRS = (
+    "modelinfos",
+    "flashinfer_autotune_cache",
+    "rocm_segmented_attention",
+)
+
+
+def _default_triton_cache_dir() -> str:
+    triton_home = os.getenv("TRITON_HOME", os.path.expanduser("~"))
+    return os.path.join(triton_home, ".triton", "cache")
+
+
+def _redirect_compile_caches(
+    mp: pytest.MonkeyPatch, cache_root: str, shared_cache_root: str
+) -> None:
+    for name in _SHARED_VLLM_CACHE_SUBDIRS:
+        with contextlib.suppress(OSError):
+            target = os.path.join(shared_cache_root, name)
+            os.makedirs(target, exist_ok=True)
+            os.symlink(target, os.path.join(cache_root, name))
+    # Env vars (not module state) so spawned EngineCore/worker processes
+    # inherit them, and monkeypatch undoes vLLM's own os.environ writes.
+    mp.setenv("VLLM_CACHE_ROOT", cache_root)
+    mp.setenv("TORCHINDUCTOR_CACHE_DIR", os.path.join(cache_root, "inductor"))
+    envs.disable_envs_cache()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _session_compile_cache():
+    """Keep compile caches out of the persistent VLLM_CACHE_ROOT.
+
+    Covers module/session-scoped engines; function-scoped tests get a fresh
+    cache from `isolated_compile_cache`. Triton (content-addressed), DeepGEMM
+    and the subdirs in `_SHARED_VLLM_CACHE_SUBDIRS` stay shared.
+    """
+    envs.disable_envs_cache()
+    shared_cache_root = envs.VLLM_CACHE_ROOT
+    shared_env = {
+        "TRITON_CACHE_DIR": os.getenv("TRITON_CACHE_DIR")
+        or _default_triton_cache_dir(),
+        "DG_JIT_CACHE_DIR": os.getenv("DG_JIT_CACHE_DIR")
+        or os.path.join(shared_cache_root, "deep_gemm"),
+    }
+    with (
+        pytest.MonkeyPatch.context() as mp,
+        tempfile.TemporaryDirectory(
+            prefix="vllm-compile-cache-", ignore_cleanup_errors=True
+        ) as cache_root,
+    ):
+        for key, value in shared_env.items():
+            mp.setenv(key, value)
+        _redirect_compile_caches(mp, cache_root, shared_cache_root)
+        yield shared_cache_root, shared_env
+    envs.disable_envs_cache()
+
+
+@pytest.fixture(autouse=True)
+def isolated_compile_cache(monkeypatch, _session_compile_cache):
+    """Give each test its own vLLM/AOT/Inductor compile cache.
+
+    Prevents a test from loading compiled artifacts produced by an earlier
+    test (or an earlier CI run), see #29440.
+    """
+    shared_cache_root, shared_env = _session_compile_cache
+    for key, value in shared_env.items():
+        monkeypatch.setenv(key, value)
+    clear_caches()
+    with tempfile.TemporaryDirectory(
+        prefix="vllm-compile-cache-", ignore_cleanup_errors=True
+    ) as cache_root:
+        _redirect_compile_caches(monkeypatch, cache_root, shared_cache_root)
+        yield cache_root
+        envs.disable_envs_cache()
 
 
 @pytest.fixture
