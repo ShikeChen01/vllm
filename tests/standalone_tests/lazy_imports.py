@@ -18,10 +18,10 @@ CHECK_SCRIPT = """
 import importlib, sys
 importlib.import_module(sys.argv[1])
 forbidden = sys.argv[2:]
-leaked = sorted(
-    name for name in sys.modules
-    if any(name == m or name.startswith(m + ".") for m in forbidden)
-)
+leaked = [
+    m for m in forbidden
+    if any(name == m or name.startswith(m + ".") for name in sys.modules)
+]
 print("LEAKED:" + ",".join(leaked))
 """
 
